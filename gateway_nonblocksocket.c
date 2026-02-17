@@ -21,7 +21,7 @@
 // POSIX API for system calls (e.g., close, read, write)
 #include <unistd.h>
 
-#include "connection.h" // Include the header file defining connection structures and constants
+#include "state_machine.h" // Include the header file defining connection structures and constants
 
 /** Maximum queued epoll events processed per invocation. */
 #define MAX_EVENTS 64
@@ -31,8 +31,6 @@
 #define UNIX_SOCKET_PATH "/tmp/gateway.sock"
 // Maximum size of the buffer for outgoing UNIX socket data
 #define UNIX_OUT_BUF 65536
-
-static int epoll_fd; // Global epoll file descriptor for managing events
 
 /**
  * Sets the provided file descriptor to non-blocking mode.
@@ -117,11 +115,9 @@ int create_unix_client() {
   return fd;
 }
 
+
 void pause_read(connection_t *conn) {
-  struct epoll_event ev;
-  ev.events = 0; // 不监听任何事件，暂停读取
-  ev.data.ptr = conn;
-  epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &ev);
+  disable_read(conn);
 }
 
 /**
@@ -158,10 +154,7 @@ void unix_append(connection_t *conn, const char *data, int len) {
   conn->out_len += len;
 
   if (was_empty) {
-    struct epoll_event ev;
-    ev.events = EPOLLOUT;
-    ev.data.ptr = conn;
-    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &ev);
+    enable_write(conn);
   }
 
   if (conn->out_len >= conn->high_watermark) {
@@ -177,18 +170,19 @@ void unix_append(connection_t *conn, const char *data, int len) {
 void close_pair(connection_t *conn) {
   connection_t *peer = conn->peer;
 
-  epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
+  event_loop_del(conn->loop, conn->fd);
   close(conn->fd);
   free(conn->outbuf);
   free(conn);
 
   if (peer) {
-    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, peer->fd, NULL);
+    event_loop_del(peer->loop, peer->fd);
     close(peer->fd);
     free(peer->outbuf);
     free(peer);
   }
 }
+
 
 void handle_read(connection_t *conn) {
   while (1) {
@@ -200,9 +194,9 @@ void handle_read(connection_t *conn) {
       unix_append(conn->peer, conn->inbuf, n);
 
     } else if (n == 0) {
-      close_pair(conn);
+      printf("Connection fd=%d closed by peer\n", conn->fd);
+      connection_on_read_eof(conn);
       return;
-
     } else {
 
       if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -222,10 +216,10 @@ void init_mcu_connection(connection_t *conn) {
 }
 
 void resume_read(connection_t *conn) {
-  struct epoll_event ev;
-  ev.events = EPOLLIN;
-  ev.data.ptr = conn;
-  epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &ev);
+  if (!(conn->events & EPOLLIN)) {
+        conn->events |= EPOLLIN;
+        update_events(conn);
+    }
 }
 
 /**
@@ -244,7 +238,7 @@ void resume_read(connection_t *conn) {
  *
  * @param conn - Connection object associated with the UNIX socket.
  */
-void handle_unix_write(connection_t *conn) {
+void handle_write(connection_t *conn) {
   while (conn->out_len > 0) {
 
     int n = write(conn->fd, conn->outbuf, conn->out_len);
@@ -264,11 +258,18 @@ void handle_unix_write(connection_t *conn) {
       return;
     }
   }
-  // 写干净了才关闭
-  struct epoll_event ev;
-  ev.events = 0;
-  ev.data.ptr = conn;
-  epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &ev);
+
+  if (conn->out_len == 0) {
+
+    disable_write(conn);
+
+    if (conn->state == CONN_STATE_READ_EOF) {
+        shutdown_write(conn);
+    }
+    
+    connection_maybe_close(conn);
+
+  }
 
   if (conn->out_len <= conn->low_watermark) {
     if (conn->peer) {
@@ -302,9 +303,11 @@ void handle_accept(connection_t *listener) {
 
     connection_t *tcp_conn = calloc(1, sizeof(connection_t));
     tcp_conn->fd = client_fd;
+    tcp_conn->events = EPOLLIN;
+    tcp_conn->loop = listener->loop;
     tcp_conn->on_read =
         handle_read; // Set the read callback for MCU connections
-    tcp_conn->on_write = handle_unix_write;
+    tcp_conn->on_write = handle_write;
     init_mcu_connection(tcp_conn);
 
     int unix_fd = create_unix_client();
@@ -312,21 +315,18 @@ void handle_accept(connection_t *listener) {
 
     connection_t *unix_conn = calloc(1, sizeof(connection_t));
     unix_conn->fd = unix_fd;
+    unix_conn->events = EPOLLIN;
+    unix_conn->loop = listener->loop;
     unix_conn->on_read = handle_read;
-    unix_conn->on_write = handle_unix_write;
+    unix_conn->on_write = handle_write;
     init_mcu_connection(unix_conn);
 
     tcp_conn->peer = unix_conn;
     unix_conn->peer = tcp_conn;
 
-    struct epoll_event ev;
-    ev.events = EPOLLIN;
-    ev.data.ptr = tcp_conn;
-    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev);
+    event_loop_add(tcp_conn->loop, tcp_conn->fd, tcp_conn->events, tcp_conn);
+    event_loop_add(unix_conn->loop, unix_conn->fd, unix_conn->events, unix_conn);
 
-    ev.events = EPOLLIN;
-    ev.data.ptr = unix_conn;
-    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, unix_conn->fd, &ev);
   }
 }
 
@@ -341,16 +341,13 @@ void handle_accept(connection_t *listener) {
  * @return Always returns 0.
  */
 int main() {
-  epoll_fd = epoll_create1(0);
-  if (epoll_fd < 0) {
-    perror("epoll_create1");
-    exit(EXIT_FAILURE);
-  }
+ event_loop_t *ev_loop = event_loop_create();
 
   /* ========== 1. 创建 TCP listener connection ========== */
 
   connection_t *tcp_conn = calloc(1, sizeof(connection_t));
   tcp_conn->fd = create_tcp_server();
+  tcp_conn->loop = ev_loop; 
   // tcp_conn->type = CONN_TCP_LISTENER;
   tcp_conn->on_read = handle_accept; // Set the read callback for accepting new
                                      // connections
@@ -362,78 +359,9 @@ int main() {
   ev.events = EPOLLIN;
   ev.data.ptr = tcp_conn;
 
-  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, tcp_conn->fd, &ev) < 0) {
-    perror("epoll_ctl tcp");
-    exit(EXIT_FAILURE);
-  }
+event_loop_add(ev_loop, tcp_conn->fd, ev.events, tcp_conn);
 
-  /* ========== 2. 创建 Unix client connection ========== */
-
-  /*unix_conn = calloc(1, sizeof(connection_t));
-
-  unix_conn->high_watermark = 64 * 1024;
-  unix_conn->low_watermark = 32 * 1024;
-
-  unix_conn->fd = create_unix_client();
-  unix_conn->on_read =
-      NULL; // No read callback needed for UNIX clientonly writing
-  unix_conn->on_write = handle_unix_write; // Set the write callback for
-                                           // handling writes to the UNIX socket
-  // unix_conn->type = CONN_UNIX;
-  unix_conn->out_cap = 4096;
-  unix_conn->in_len = 0;
-  unix_conn->outbuf = malloc(unix_conn->out_cap);
-
-  ev.events = 0; // 先不监听 EPOLLOUT
-  ev.data.ptr = unix_conn;
-
-  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, unix_conn->fd, &ev) < 0) {
-    perror("epoll_ctl unix");
-    exit(EXIT_FAILURE);
-  }
-*/
-
-  /* ========== 3. Reactor 主循环 ========== */
-
-  struct epoll_event events[MAX_EVENTS];
-
-  while (1) { // Main event loop to process I/O readiness
-    int n = epoll_wait(epoll_fd, events, MAX_EVENTS,
-                       -1); // Wait for events on active file descriptors
-
-    if (n < 0) {
-      if (errno == EINTR)
-        continue;
-      perror("epoll_wait");
-      break;
-    }
-
-    for (int i = 0; i < n; i++) { // Iterate over the triggered events
-      printf("event: %u\n", events[i].events);
-      connection_t *conn =
-          events[i]
-              .data.ptr; // Get the file descriptor associated with the event
-
-      if (events[i].events & (EPOLLHUP | EPOLLERR)) {
-        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
-        close(conn->fd); // Close the socket on hang-up or error events
-        free(conn);      // Free the memory allocated for the connection
-        continue;
-      }
-
-      if ((events[i].events & EPOLLIN) &&
-          conn->on_read) { // Check if the event is for reading
-        conn->on_read(
-            conn); // Call the read callback function for the connection
-      }
-
-      if ((events[i].events & EPOLLOUT) &&
-          conn->on_write) { // Check if the event is for writing
-        conn->on_write(
-            conn); // Call the write callback function for the connection
-      }
-    }
-  }
+event_loop_run(ev_loop); // Start the event loop to process events and callbacks
 
   return 0; // Exit the program successfully
 }
