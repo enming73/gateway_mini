@@ -1,6 +1,6 @@
 #include <stdint.h>
 
-typedef struct event_loop event_loop_t;
+#include "connection.h"
 
 event_loop_t *event_loop_create();
 void event_loop_run(event_loop_t *loop);

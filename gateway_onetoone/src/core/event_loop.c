@@ -1,5 +1,4 @@
 #include "event_loop.h"
-#include "connection.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <sys/epoll.h>
@@ -15,8 +14,7 @@ event_loop_t *event_loop_create() {
   return loop;
 }
 
-void event_loop_add(event_loop_t *loop, int fd, uint32_t events,
-                    void *ptr) {
+void event_loop_add(event_loop_t *loop, int fd, uint32_t events, void *ptr) {
   struct epoll_event ev = {0};
   ev.events = events;
   ev.data.ptr = ptr;
@@ -24,7 +22,7 @@ void event_loop_add(event_loop_t *loop, int fd, uint32_t events,
 }
 
 void event_loop_mod(event_loop_t *loop, int fd, uint32_t events, void *ptr) {
-  struct epoll_event ev ={0};
+  struct epoll_event ev = {0};
   ev.events = events;
   ev.data.ptr = ptr;
   epoll_ctl(loop->epfd, EPOLL_CTL_MOD, fd, &ev);
