@@ -1,3 +1,4 @@
+#include <bus/event_bus.h>
 #include <core/connection.h>
 #include <core/event_loop.h>
 #include <stdio.h>
@@ -16,7 +17,6 @@ connection_t *connection_create(event_loop_t *loop, int fd) {
   conn->outbuf = malloc(conn->out_cap); // 输出缓冲区，动态分配
 
   conn->high_watermark = 8192; // 可选：设置高水位线，单位为字节
-  conn->low_watermark = 4096;  // 可选：设置低水位线，单位为字节
 
   conn->state = CONN_STATE_OPEN; // 初始状态为打开
 
@@ -102,11 +102,7 @@ void connection_append_out(connection_t *conn, const char *data, int len) {
   }
 
   if (conn->out_len >= conn->high_watermark) {
-    printf("Unix buffer reached high watermark, pausing reads from peer\n");
-    // 可选：实现流控逻辑，例如暂停读取更多数据
-    if (conn->peer) {
-      printf("Pausing reads from peer connection fd=%d\n", conn->peer->fd);
-      connection_disable_read(conn->peer);
-    }
+    printf("slow subscriber\n");
+    conn->state = CONN_STATE_CLOSING;
   }
 }

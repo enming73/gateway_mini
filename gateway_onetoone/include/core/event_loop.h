@@ -1,6 +1,6 @@
 #include <stdint.h>
 
-#include "connection.h"
+#include <core/connection.h>
 
 event_loop_t *event_loop_create();
 void event_loop_run(event_loop_t *loop);

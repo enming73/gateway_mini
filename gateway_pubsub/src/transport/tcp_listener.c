@@ -22,7 +22,6 @@
 #include <unistd.h>
 
 #define TCP_PORT 9000
-#define UNIX_SOCKET_PATH "/tmp/gateway.sock"
 
 /**
  * Creates and sets up a non-blocking TCP server socket.
@@ -65,38 +64,6 @@ int create_tcp_server() {
 }
 
 /**
- * Creates and connects to a UNIX domain socket.
- * This function initializes the socket, sets its address, and connects to the
- * specified UNIX domain server. If the process fails (e.g., address
- * unavailable, permission issues), it logs an error and terminates.
- */
-/**
- * Creates and connects to a non-blocking UNIX domain socket.
- *
- * This function sets up a socket to allow communication over the UNIX-domain.
- * It attempts to connect to a server specified by a file path.
- *
- * @return The file descriptor of the UNIX domain socket upon success.
- */
-int create_unix_client() {
-  int fd = socket(AF_UNIX, SOCK_STREAM, 0); // Create a UNIX domain socket
-
-  struct sockaddr_un addr = {0}; // Initialize the socket address structure
-  addr.sun_family = AF_UNIX;     // Address family set to UNIX domain sockets
-  strcpy(addr.sun_path,
-         UNIX_SOCKET_PATH); // Copy the socket path to the address structure
-
-  if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-    perror("connect to unix socket failed"); // Print error message if
-                                             // connection fails
-    close(fd);          // Close the socket file descriptor on failure
-    exit(EXIT_FAILURE); // Exit the program with failure status
-  } // Attempt to connect to the specified UNIX socket
-  set_nonblocking(fd);
-  return fd;
-}
-
-/**
  * Accepts new incoming connections to the listener.
  *
  * This function is triggered when the TCP listener has pending
@@ -119,22 +86,10 @@ void handle_accept(connection_t *listener) {
 
     connection_t *tcp_conn = connection_create(listener->loop, client_fd);
     tcp_conn->on_read =
-        handle_read; // Set the read callback for MCU connections
+        handle_mcu_read; // Set the read callback for MCU connections
     tcp_conn->on_write = handle_write;
 
-    int unix_fd = create_unix_client();
-    set_nonblocking(unix_fd);
-
-    connection_t *unix_conn = connection_create(listener->loop, unix_fd);
-    unix_conn->on_read = handle_read;
-    unix_conn->on_write = handle_write;
-
-    tcp_conn->peer = unix_conn;
-    unix_conn->peer = tcp_conn;
-
     event_loop_add(tcp_conn->loop, tcp_conn->fd, tcp_conn->events, tcp_conn);
-    event_loop_add(unix_conn->loop, unix_conn->fd, unix_conn->events,
-                   unix_conn);
   }
 }
 
@@ -150,5 +105,4 @@ void transport_tcp_init(event_loop_t *loop) {
   tcp_conn->out_len = 0;
   tcp_conn->events = EPOLLIN; // Listen for incoming connections (read events)
   event_loop_add(loop, tcp_conn->fd, tcp_conn->events, tcp_conn);
-  event_loop_run(loop); // Start the event loop to process events and callbacks
 }

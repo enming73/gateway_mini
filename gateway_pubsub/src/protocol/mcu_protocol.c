@@ -1,38 +1,29 @@
+#include <bus/event_bus.h>
 #include <errno.h>
 #include <protocol/mcu_protocol.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
-void handle_read(connection_t *conn) {
+void handle_mcu_read(connection_t *conn) {
   while (1) {
 
     int n = read(conn->fd, conn->inbuf, sizeof(conn->inbuf));
 
     if (n > 0) {
-
-      // unix_append(conn->peer, conn->inbuf, n);
-      connection_append_out(conn->peer, conn->inbuf, n);
+      event_publish("sensor", conn->inbuf, n);
 
     } else if (n == 0) {
       printf("Connection fd=%d closed by peer\n", conn->fd);
       conn->state = CONN_STATE_READ_EOF;
-      connection_disable_read(conn);
-      if (conn->peer && conn->peer->out_len == 0) {
-        connection_shutdown_write(conn->peer);
-      }
+      connection_close(conn);
       return;
     } else {
 
       if (errno == EAGAIN || errno == EWOULDBLOCK)
         return;
 
-      connection_t *peer = conn->peer;
-
       connection_close(conn);
-      if (peer) {
-        connection_close(peer);
-      }
       return;
     }
   }
@@ -55,6 +46,11 @@ void handle_read(connection_t *conn) {
  * @param conn - Connection object associated with the UNIX socket.
  */
 void handle_write(connection_t *conn) {
+  if (conn->state == CONN_STATE_CLOSING) {
+    event_unsubscribe_all(conn);
+    connection_close(conn);
+    return;
+  }
   while (conn->out_len > 0) {
 
     int n = write(conn->fd, conn->outbuf, conn->out_len);
@@ -65,34 +61,16 @@ void handle_write(connection_t *conn) {
 
       conn->out_len -= n;
 
-    } else if (errno == EAGAIN) {
+    } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
       printf("Unix socket not ready for writing, will retry later\n%s\n",
              strerror(errno));
       return;
     } else {
+      event_unsubscribe_all(conn);
       connection_close(conn);
       return;
     }
   }
 
-  /*if (conn->out_len == 0) {
-
-    disable_write(conn);
-
-    if (conn->state == CONN_STATE_READ_EOF) {
-      shutdown_write(conn);
-    }
-
-    connection_maybe_close(conn);
-  }*/
   connection_disable_write(conn);
-
-  if (conn->out_len <= conn->low_watermark) {
-    if (conn->peer) {
-      printf("Unix buffer below low watermark, resuming reads from peer "
-             "connection fd=%d\n",
-             conn->peer->fd);
-      connection_enable_read(conn->peer);
-    }
-  }
 }

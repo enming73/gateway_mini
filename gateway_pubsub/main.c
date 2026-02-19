@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include <core/event_loop.h>
 #include <transport/tcp_listener.h>
+#include <transport/unix_listener.h>
 
 // Entry point of the program that sets up the event loop
 /**
@@ -18,6 +19,10 @@ int main() {
 
   /* ========== 1. 创建 TCP listener connection ========== */
   transport_tcp_init(ev_loop);
+
+  transport_unix_init(ev_loop);
+
+  event_loop_run(ev_loop);
 
   return 0; // Exit the program successfully
 }
