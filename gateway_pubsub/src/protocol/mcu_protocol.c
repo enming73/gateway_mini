@@ -19,12 +19,10 @@ void handle_mcu_read(connection_t *conn) {
       connection_close(conn);
       return;
     } else {
-
-      if (errno == EAGAIN || errno == EWOULDBLOCK)
+      if (errno != EAGAIN || errno != EWOULDBLOCK) {
+        connection_close(conn);
         return;
-
-      connection_close(conn);
-      return;
+      }
     }
   }
 }
